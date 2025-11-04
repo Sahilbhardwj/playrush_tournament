@@ -25,7 +25,7 @@ pub mod playrush_tournament {
         Ok(())
     }
 
-    // --- Join Tournament with SOL ---
+    // Join Tournament with SOL
     pub fn join_tournament_sol(ctx: Context<JoinTournamentSol>, amount: u64) -> Result<()> {
         let tournament = &mut ctx.accounts.tournament;
         require!(tournament.is_active, PlayrushError::TournamentClosed);
@@ -49,8 +49,8 @@ pub mod playrush_tournament {
         )?;
 
         // Transfer SOL to Tournament PDA
-        let tournament_key = tournament.key(); 
-        let tournament_info = tournament.to_account_info(); 
+        let tournament_key = tournament.key(); // extract key before mutable borrow ends
+        let tournament_info = tournament.to_account_info(); // same here
 
         anchor_lang::solana_program::program::invoke(
             &anchor_lang::solana_program::system_instruction::transfer(
@@ -61,7 +61,7 @@ pub mod playrush_tournament {
             &[ctx.accounts.player.to_account_info(), tournament_info],
         )?;
 
-        
+        // Now safe to mutate again
         tournament.total_pool = tournament
             .total_pool
             .checked_add(pool_share)
@@ -85,7 +85,7 @@ pub mod playrush_tournament {
         Ok(())
     }
 
-    // --- Join Tournament with PR Token ---
+    // Join Tournament with PR Token
     pub fn join_tournament_token(ctx: Context<JoinTournamentToken>, amount: u64) -> Result<()> {
         let tournament = &mut ctx.accounts.tournament;
         require!(tournament.is_active, PlayrushError::TournamentClosed);
@@ -142,12 +142,13 @@ pub mod playrush_tournament {
         Ok(())
     }
 
-    // --- Close Tournament Entries ---
+    // Close Tournament Entries
     pub fn close_entry(ctx: Context<CloseEntry>) -> Result<()> {
         let tournament = &mut ctx.accounts.tournament;
         tournament.is_active = false;
         Ok(())
     }
+    //free to earn  rewards distribution
     pub fn distribute_rewards(ctx: Context<DistributeRewards>) -> Result<()> {
         let tournament = &ctx.accounts.tournament;
         let total = tournament.total_pool;
@@ -237,9 +238,97 @@ pub mod playrush_tournament {
         Ok(())
     }
 
+    //test  instruction
+    pub fn test_idl(_ctx: Context<TestIdl>) -> Result<()> {
+        msg!(" PlayRush Tournament Program connection successful!");
+        Ok(())
+    }
+pub fn distribute_free2earn_rewards(ctx: Context<DistributeFree2EarnRewards>) -> Result<()> {
+    // clone AccountInfo before mut borrow
+    let pool_info = ctx.accounts.pool.to_account_info();
+    let treasury_info = ctx.accounts.treasury_token_account.to_account_info();
+    let token_program = ctx.accounts.token_program.to_account_info();
+
+    // mutable borrow now safe
+    let pool = &mut ctx.accounts.pool;
+    let treasury_balance = ctx.accounts.treasury_token_account.amount;
+
+    // Calculate inflow
+    let inflow = treasury_balance
+        .checked_sub(pool.last_recorded_treasury)
+        .ok_or(PlayrushError::Overflow)?;
+
+    if inflow == 0 {
+        msg!("No new inflows to distribute this month.");
+        return Ok(());
+    }
+
+    // 10% allocation
+    let allocation = inflow / 10;
+
+    // Reward splits
+    let first = allocation * 25 / 100;
+    let second = allocation * 15 / 100;
+    let third = allocation * 10 / 100;
+    let rest_total = allocation * 50 / 100;
+    let rest_share = rest_total / 7;
+
+    let rewards = [
+        first, second, third,
+        rest_share, rest_share, rest_share, rest_share, rest_share, rest_share, rest_share,
+    ];
+
+    let signer_seeds: &[&[u8]] = &[b"free2earn", &[pool.bump]];
+
+    let recipients = [
+        &ctx.accounts.first_place_account,
+        &ctx.accounts.second_place_account,
+        &ctx.accounts.third_place_account,
+        &ctx.accounts.fourth_place_account,
+        &ctx.accounts.fifth_place_account,
+        &ctx.accounts.sixth_place_account,
+        &ctx.accounts.seventh_place_account,
+        &ctx.accounts.eighth_place_account,
+        &ctx.accounts.ninth_place_account,
+        &ctx.accounts.tenth_place_account,
+    ];
+
+    for (i, recipient) in recipients.iter().enumerate() {
+        token::transfer(
+            CpiContext::new_with_signer(
+                token_program.clone(),
+                Transfer {
+                    from: treasury_info.clone(),
+                    to: recipient.to_account_info(),
+                    authority: pool_info.clone(),
+                },
+                &[signer_seeds],
+            ),
+            rewards[i],
+        )?;
+    }
+
+    // Update pool data after all transfers
+    pool.last_recorded_treasury = treasury_balance;
+    pool.total_distributed = pool
+        .total_distributed
+        .checked_add(allocation)
+        .ok_or(PlayrushError::Overflow)?;
+
+    msg!(
+        "Distributed {} tokens as Free2Earn rewards (10% of inflow)",
+        allocation
+    );
+
+    Ok(())
 }
 
-//  ACCOUNT STRUCTS 
+
+}
+
+//
+// ─── ACCOUNT STRUCTS ─────────────────────────────────────────────────────────────
+//
 
 #[derive(Accounts)]
 #[instruction(game_id: String, tournament_id: String)]
@@ -311,19 +400,17 @@ pub struct DistributeRewards<'info> {
     #[account(mut)]
     pub tournament: Account<'info, Tournament>,
 
-    
     #[account(mut)]
     pub first_place: UncheckedAccount<'info>,
 
-
+   
     #[account(mut)]
     pub second_place: UncheckedAccount<'info>,
 
-  
     #[account(mut)]
     pub third_place: UncheckedAccount<'info>,
 
-
+    // Token mode accounts
     #[account(mut)]
     pub pool_token_account: UncheckedAccount<'info>,
 
@@ -339,8 +426,45 @@ pub struct DistributeRewards<'info> {
     pub token_program: Program<'info, token::Token>,
     pub system_program: Program<'info, System>,
 }
+#[derive(Accounts)]
+pub struct TestIdl {}
 
-//
+#[derive(Accounts)]
+pub struct DistributeFree2EarnRewards<'info> {
+    #[account(
+        mut,
+        seeds = [b"free2earn"],
+        bump = pool.bump
+    )]
+    pub pool: Account<'info, Free2EarnPool>,
+
+    #[account(mut)]
+    pub treasury_token_account: Account<'info, TokenAccount>,
+
+    #[account(mut)]
+    pub first_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub second_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub third_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub fourth_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub fifth_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub sixth_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub seventh_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub eighth_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub ninth_place_account: Account<'info, TokenAccount>,
+    #[account(mut)]
+    pub tenth_place_account: Account<'info, TokenAccount>,
+
+    pub token_program: Program<'info, Token>,
+}
+
 // ─── STATE STRUCTS ───────────────────────────────────────────────────────────────
 //
 
@@ -364,7 +488,13 @@ pub struct PlayerEntry {
     pub bump: u8,
 }
 
-//
+#[account]
+pub struct Free2EarnPool {
+    pub last_recorded_treasury: u64, // balance snapshot for previous month
+    pub total_distributed: u64,      // total lifetime distributed
+    pub bump: u8,
+}
+
 // ─── ERRORS ─────────────────────────────────────────────────────────────────────
 //
 
